@@ -124,9 +124,9 @@ class PPOAgent:
             loss = -loss # gradient ascent
             tf.summary.scalar('loss', loss)
 
-        self.merged = tf.summary.merge_all()
         optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate, epsilon=1e-5)
         self.train_op = optimizer.minimize(loss, var_list=policy_variables)
+        self.merge_op = tf.summary.merge_all()
         
         self.sess.run(tf.global_variables_initializer())
 
@@ -195,6 +195,11 @@ class PPOAgent:
                             rewards=batch_samples[2], 
                             value_preds_next=batch_samples[3], 
                             gaes=batch_samples[4])
+                self._record(observations=batch_samples[0], 
+                             actions=batch_samples[1], 
+                             rewards=batch_samples[2], 
+                             value_preds_next=batch_samples[3], 
+                             gaes=batch_samples[4])
                
             self.record_observations = []
             self.record_actions = []
@@ -203,6 +208,14 @@ class PPOAgent:
 
     def _learn(self, observations, actions, rewards, value_preds_next, gaes):
         self.sess.run([self.train_op], feed_dict={self.policy.observation: observations,
+                                                  self.old_policy.observation: observations,
+                                                  self.actions: actions,
+                                                  self.rewards: rewards,
+                                                  self.value_preds_next: value_preds_next,
+                                                  self.gaes: gaes})
+
+    def _record(self, observations, actions, rewards, value_preds_next, gaes):
+        self.sess.run([self.merge_op], feed_dict={self.policy.observation: observations,
                                                   self.old_policy.observation: observations,
                                                   self.actions: actions,
                                                   self.rewards: rewards,
