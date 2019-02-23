@@ -5,15 +5,19 @@ import gym
 render = False
 #render = True
 env = gym.make('CartPole-v1')
+#env = gym.make('BipedalWalker-v2')
 
 # NOTE input of the original OpenAI Gym Environment
-#print(env.observation_space) # Box
-#print(env.action_space) # Discrete
+print(len(env.observation_space.shape)) # Box
+print(len(env.action_space.shape)) # Discrete
 
-# NOTE space...
-obs_space = env.observation_space.shape
-act_space = env.action_space.n
-
+if len(env.action_space.shape) >= 1:
+    obs_space = env.observation_space.shape
+    act_space = env.action_space.shape
+else:
+    obs_space = env.observation_space.shape
+    act_space = env.action_space
+    
 policy = PolicyWithValue(obs_space, act_space, 'policy')
 old_policy = PolicyWithValue(obs_space, act_space, 'old_policy')
 
