@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
 import copy
+import time
 
 """
 act_space will be represented using list.
@@ -19,11 +20,11 @@ class PolicyWithValue:
             with tf.variable_scope('policy_net'):
                 layer_1 = tf.layers.dense(inputs=self.obs, units=20, activation=tf.tanh)
                 layer_2 = tf.layers.dense(inputs=layer_1, units=20, activation=tf.tanh)
-                layer_3 = tf.layers.dense(inputs=layer_2, units=self.act_space, activation=tf.tanh)
                 
-                self.act_probs = {}
-                for i in range(len(self.action_space)):
-                    self.act_probs[i] = tf.layers.dense(inputs=tf.divide(layer_3, temp), units=self.action_space[i], activation=tf.nn.softmax)
+                self.act_probs = []
+                for i in range(len(self.act_space)):
+                    layer_3 = tf.layers.dense(inputs=layer_2, units=self.act_space[i], activation=tf.tanh)
+                    self.act_probs.append(tf.layers.dense(inputs=tf.divide(layer_3, temp), units=self.act_space[i], activation=tf.nn.softmax))
 
             with tf.variable_scope('value_net'):
                 layer_1 = tf.layers.dense(inputs=self.obs, units=20, activation=tf.tanh)
@@ -31,15 +32,15 @@ class PolicyWithValue:
                 self.v_preds = tf.layers.dense(inputs=layer_2, units=1, activation=None)
             
             # for stochastic
-            self.act_stochastic = {}
-            for i in range(len(self.action_space)):
-                self.act_stochastic[i] = tf.multinomial(tf.log(self.act_probs[i]), num_samples=1)
-                self.act_stochastic[i] = tf.reshape(self.act_stochastic[i], shape=[-1])
+            self.act_stochastic = []
+            for i in range(len(self.act_space)):
+                act_multinomial = tf.multinomial(tf.log(self.act_probs[i]), num_samples=1)
+                self.act_stochastic.append(tf.reshape(act_multinomial, shape=[-1]))
             
             # for deterministic
-            self.act_deterministic = {}
-            for i in range(len(self.action_space)):
-                self.act_deterministic[i] = tf.argmax(self.act_probs[i], axis=1)
+            self.act_deterministic = []
+            for i in range(len(self.act_space)):
+                self.act_deterministic.append(tf.argmax(self.act_probs[i], axis=1))
 
             self.scope = tf.get_variable_scope().name
     
@@ -55,8 +56,11 @@ class PolicyWithValue:
 class PPOAgent:
     def __init__(self, policy, old_policy, horizon, learning_rate, epochs, 
                  batch_size, gamma, lmbd, clip_value, value_coeff, entropy_coeff):
+
+        print('open session')
         self.sess = tf.Session()
-        self.writer = tf.summary.FileWriter('./log/train', self.sess.graph)
+        current_time = int(time.time())
+        self.writer = tf.summary.FileWriter('./log/train_'+str(current_time), self.sess.graph)
 
         self.policy = policy
         self.old_policy = old_policy
@@ -101,7 +105,7 @@ class PPOAgent:
             self.v_preds_next = tf.placeholder(dtype=tf.float32, shape=[None], name='v_preds_next')
             self.gaes = tf.placeholder(dtype=tf.float32, shape=[None], name='gaes')
 
-        loss = {}
+        loss = []
         for i in range(len(self.policy.act_space)):
             act_probs = self.policy.act_probs[i]
             act_probs_old = self.old_policy.act_probs[i]
@@ -125,13 +129,13 @@ class PPOAgent:
 
             # entropy bonus (9)
             with tf.variable_scope('loss/entropy'):
-                entropy = -tf.reduce_sum(self.policy.act_probs * 
-                                         tf.log(tf.clip_by_value(self.policy.act_probs, 1e-10, 1.0)), axis=1)
+                entropy = -tf.reduce_sum(self.policy.act_probs[i] * 
+                                         tf.log(tf.clip_by_value(self.policy.act_probs[i], 1e-10, 1.0)), axis=1)
                 entropy = tf.reduce_mean(entropy, axis=0)
                 tf.summary.scalar('entropy', entropy)
 
             with tf.variable_scope('loss'):
-                loss[i] = loss_clip + entropy_coeff * entropy
+                loss.append(loss_clip + entropy_coeff * entropy)
         
         # squared difference between value (9)
         with tf.variable_scope('loss/value'):
@@ -144,7 +148,7 @@ class PPOAgent:
         with tf.variable_scope('loss'):
             # c_1 = value_coeff, c_2 = entropy_coeff
             # loss = \sum ((clipped loss) + c_2 * (entropy bonus)) - c_1 * (value loss)
-            loss = tf.reduce_sum(loss.values()) - value_coeff * loss_v
+            loss = tf.add_n(loss) - value_coeff * loss_v
             # loss : up
             # clipped loss : up
             # value loss : down
@@ -164,14 +168,80 @@ class PPOAgent:
         obs = np.stack([obs]).astype(dtype=np.float32)
         act, v_pred = self.policy._get_action(sess=self.sess, obs=obs, stochastic=stochastic)
         
-        act = np.asscalar(act)
+        act = [np.asscalar(a) for a in act]
         v_pred = np.asscalar(v_pred)
+        #FIXME
+        #print(act, v_pred)
 
         self.list_observations.append(obs)
         self.list_actions.append(act)
         self.list_v_preds.append(v_pred)
 
         return act, v_pred
+
+    def observe_all_and_learn(self, rewards):
+        self.list_rewards = rewards
+        
+        # make v_preds_next from v_preds
+        self.list_v_preds_next = self.list_v_preds[1:] + [0]
+        
+        #print('gaes')
+        # get generalized advantage estimations
+        self.list_gaes = self._get_gaes(self.list_rewards, 
+                                          self.list_v_preds, 
+                                          self.list_v_preds_next)
+
+        # make list_* into numpy array to feed to placeholders
+        np_observations = np.reshape(self.list_observations, newshape=[-1] + list(self.policy.ob_space))
+        np_actions = np.array(self.list_actions).astype(dtype=np.int32)
+        np_rewards = np.array(self.list_rewards).astype(dtype=np.float32)
+        np_v_preds_next = np.array(self.list_v_preds_next).astype(dtype=np.float32)
+        np_gaes = np.array(self.list_gaes).astype(dtype=np.float32)
+        np_gaes = (np_gaes - np_gaes.mean()) / np_gaes.std()
+
+        input_samples = [np_observations, np_actions, np_rewards, np_v_preds_next, np_gaes]
+        
+        # update old policy with current policy
+        self._update_old_policy()
+        
+        # sample horizon
+        if self.horizon != -1:
+            horizon_indices = np.random.randint(low=0, high=np_observations.shape[0], size=self.horizon)
+            horizon_samples = [np.take(a=input_sample, indices=horizon_indices, axis=0) for input_sample in input_samples]
+
+        #print('learn')
+        # learn
+        for epoch in range(self.epochs):
+            #print(epoch)
+
+            # sample batch
+            if self.horizon != -1:
+                batch_indices = np.random.randint(low=0, high=self.horizon, size=self.batch_size)
+                batch_samples = [np.take(a=input_sample, indices=batch_indices, axis=0) for input_sample in horizon_samples]
+            else:
+                batch_indices = np.random.randint(low=0, high=np_observations.shape[0], size=self.batch_size)
+                batch_samples = [np.take(a=input_sample, indices=batch_indices, axis=0) for input_sample in input_samples]
+
+            self._learn(observations=batch_samples[0], 
+                        actions=batch_samples[1], 
+                        rewards=batch_samples[2], 
+                        v_preds_next=batch_samples[3], 
+                        gaes=batch_samples[4])
+        
+        summary = self._record(observations=batch_samples[0], 
+                               actions=batch_samples[1], 
+                               rewards=batch_samples[2], 
+                               v_preds_next=batch_samples[3], 
+                               gaes=batch_samples[4])[0]
+        
+        self.writer.add_summary(summary, self.iteration)
+        
+        self.iteration += 1
+           
+        self.list_observations = []
+        self.list_actions = []
+        self.list_v_preds = []
+        self.list_rewards = []
 
     def observe_and_learn(self, reward, terminal, score=False):
         self.list_rewards.append(reward)
@@ -269,3 +339,9 @@ class PPOAgent:
 
     def _update_old_policy(self):
         self.sess.run(self.assign_ops)
+
+    def _close_session(self):
+        print('reset graph')
+        tf.reset_default_graph()
+        print('close session')
+        self.sess.close()
